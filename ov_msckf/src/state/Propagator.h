@@ -42,6 +42,7 @@ namespace ov_msckf {
     class Propagator {
 
     public:
+        bool useWO = false;
 
         /**
          * @brief Struct for a single imu measurement (time, wm, am)
@@ -58,6 +59,18 @@ namespace ov_msckf {
             Eigen::Matrix<double, 3, 1> am;
 
         };
+
+        struct WOdata {
+            float linear_vel;
+            double timestamp;
+        };
+
+        struct IMU_WO_DATA { 
+            std::vector<IMUDATA> imu_data_vec; 
+            std::vector<WOdata> wo_data_vec; 
+        }; 
+
+          
 
 
         /**
@@ -150,6 +163,24 @@ namespace ov_msckf {
 
         }
 
+        /// NEW
+        /**
+         * @brief Stores incoming wheel linear velocity readings
+         * @param linear velocity twist x
+         */
+        void feed_wheel_linear_vel(double timestamp, float linear_vel)
+        {
+            WOdata data;
+            data.timestamp = timestamp;
+            data.linear_vel = linear_vel;
+            wo_data.emplace_back(data);
+
+            // Update the new linear velocity value
+            /*wheel_odom_data = linear_vel;
+            wheel_odom_timestamp = timestamp;*/
+        }
+
+
 
         /**
          * @brief Propagate state up to given timestamp and then clone
@@ -193,6 +224,8 @@ namespace ov_msckf {
          * @return Vector of measurements (if we could compute them)
          */
         static std::vector<IMUDATA> select_imu_readings(const std::vector<IMUDATA>& imu_data, double time0, double time1);
+
+        static IMU_WO_DATA select_imu_WO_readings(const std::vector<IMUDATA>& imu_data, const std::vector<WOdata>& wo_data, double time0, double time1);
 
         /**
          * @brief Nice helper function that will linearly interpolate between two imu messages.
@@ -242,6 +275,9 @@ namespace ov_msckf {
         void predict_and_compute(State *state, const IMUDATA data_minus, const IMUDATA data_plus,
                                  Eigen::Matrix<double, 15, 15> &F, Eigen::Matrix<double, 15, 15> &Qd);
 
+        void predict_and_compute_WO(State *state, const IMUDATA data_minus, const IMUDATA data_plus, const WOdata data_wo_minus, const WOdata data_wo_plus,
+                                 Eigen::Matrix<double, 15, 15> &F, Eigen::Matrix<double, 15, 15> &Qd);
+
         /**
          * @brief Discrete imu mean propagation.
          *
@@ -268,7 +304,12 @@ namespace ov_msckf {
          * @param new_v The resulting new velocity after integration
          * @param new_p The resulting new position after integration
          */
-        void predict_mean_discrete(State *state, double dt,
+        void predict_mean_discrete(State *state, double dt, 
+                                   const Eigen::Vector3d &w_hat1, const Eigen::Vector3d &a_hat1,
+                                   const Eigen::Vector3d &w_hat2, const Eigen::Vector3d &a_hat2,
+                                   Eigen::Vector4d &new_q, Eigen::Vector3d &new_v, Eigen::Vector3d &new_p);
+
+        void predict_mean_discrete_wo(State *state, double dt, double dt_wo, const float wo_vel1, const float wo_vel2,
                                    const Eigen::Vector3d &w_hat1, const Eigen::Vector3d &a_hat1,
                                    const Eigen::Vector3d &w_hat2, const Eigen::Vector3d &a_hat2,
                                    Eigen::Vector4d &new_q, Eigen::Vector3d &new_v, Eigen::Vector3d &new_p);
@@ -309,6 +350,18 @@ namespace ov_msckf {
 
         /// Our history of IMU messages (time, angular, linear)
         std::vector<IMUDATA> imu_data;
+
+        /// NEW: 
+        // Our history of wheel odometry messages
+        std::vector<WOdata> wo_data;
+
+
+        /*float wheel_odom_data;
+        double wheel_odom_timestamp;*/
+        // Check if it's the first IMU reding to store the initial rotation
+        bool first_IMU_reading = true;
+        Eigen::Matrix<double,3,3> first_R_Gtoi;
+        //Eigen::Vector4d first_R_Gtoi;
 
         /// Gravity vector
         Eigen::Matrix<double, 3, 1> _gravity;

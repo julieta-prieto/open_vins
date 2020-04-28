@@ -37,6 +37,8 @@
 #include "utils/dataset_reader.h"
 #include "utils/parse_ros.h"
 
+#include <tf/transform_listener.h>
+
 
 using namespace ov_msckf;
 
@@ -50,11 +52,17 @@ double time_buffer = -1;
 cv::Mat img0_buffer, img1_buffer;
 
 // Callback functions
+void callback_wheelodom(const nav_msgs::Odometry::ConstPtr& msg);
+
 void callback_inertial(const sensor_msgs::Imu::ConstPtr& msg);
 void callback_monocular(const sensor_msgs::ImageConstPtr& msg0);
 void callback_stereo(const sensor_msgs::ImageConstPtr& msg0, const sensor_msgs::ImageConstPtr& msg1);
 
-
+ros::Publisher wheelodom_globalframe_pub;
+nav_msgs::Odometry wh_odom_g;
+bool use_WO;
+double wo_timestamp;
+float wo_linear_vel_x;
 
 // Main function
 int main(int argc, char** argv) {
@@ -68,6 +76,8 @@ int main(int argc, char** argv) {
     sys = new VioManager(params);
     viz = new RosVisualizer(nh, sys);
 
+    // Indicate whether wheel odometry is used or not
+    use_WO = params.use_wheel_odometry;
 
     //===================================================================================
     //===================================================================================
@@ -90,6 +100,13 @@ int main(int argc, char** argv) {
 
     // Create subscribers
     ros::Subscriber subimu = nh.subscribe(topic_imu.c_str(), 9999, callback_inertial);
+
+    // Create subscriber to wheel odometry
+    std::string topic_wheel = "/velocity_controller/odom";
+    //wheelodom_globalframe_pub = nh.advertise<nav_msgs::Odometry>("wheelodomGF", 1000);
+    ros::Subscriber subwheel = nh.subscribe(topic_wheel.c_str(), 9999, callback_wheelodom);
+    
+
     ros::Subscriber subcam;
     if(params.state_options.num_cameras == 1) {
         ROS_INFO("subscribing to: %s", topic_camera0.c_str());
@@ -125,6 +142,18 @@ int main(int argc, char** argv) {
 
 }
 
+void callback_wheelodom(const nav_msgs::Odometry::ConstPtr& msg) {
+
+    wo_timestamp = msg->header.stamp.toSec();
+    wo_linear_vel_x = msg->twist.twist.linear.x;
+
+    // send it to our VIO system
+    /*double timem = msg->header.stamp.toSec();
+    float linear_vel_x = msg->twist.twist.linear.x;
+    sys->feed_measurement_wheel(timem, linear_vel_x);*/
+
+}
+
 
 void callback_inertial(const sensor_msgs::Imu::ConstPtr& msg) {
 
@@ -134,8 +163,29 @@ void callback_inertial(const sensor_msgs::Imu::ConstPtr& msg) {
     wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
     am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 
+    if (use_WO)
+    {
+        if(wo_timestamp <= timem && fabs(wo_linear_vel_x) < 10)
+        {
+          //std::cout << "time diff between odom and imu msg: " << t - wh_odom_t << std::endl;
+          //Eigen::Vector3d vel(0, wh_odom.twist.twist.linear.x, 0);
+            sys->set_use_wheel_odom(true);
+          sys->feed_measurement_imu_whOdom(timem, wo_timestamp, wo_linear_vel_x, wm, am);
+        }
+        else
+        {
+          sys->set_use_wheel_odom(false);
+          sys->feed_measurement_imu(timem, wm, am);
+          std::cout << "did not get odom msg with Imu" << std::endl;
+        }
+    }
+    else
+    {
+        sys->feed_measurement_imu(timem, wm, am);
+    }
+
     // send it to our VIO system
-    sys->feed_measurement_imu(timem, wm, am);
+    //sys->feed_measurement_imu(timem, wm, am);
     viz->visualize_odometry(timem);
 
 }

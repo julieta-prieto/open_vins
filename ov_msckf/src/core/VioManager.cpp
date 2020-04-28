@@ -119,6 +119,9 @@ VioManager::VioManager(VioManagerOptions& params_) {
 
     // Initialize our state propagator
     propagator = new Propagator(params.imu_noises, params.gravity);
+    VioManager::set_use_wheel_odom(params.use_wheel_odometry);
+    /*this->useWO = params.use_wheel_odometry;
+    propagator->useWO = this->useWO;*/
 
     // Our state initialize
     initializer = new InertialInitializer(params.gravity,params.init_window_time,params.init_imu_thresh);
@@ -145,20 +148,31 @@ void VioManager::feed_measurement_imu(double timestamp, Eigen::Vector3d wm, Eige
 }
 
 
+void VioManager::feed_measurement_imu_whOdom(double timestamp, double t_wh, const float linearVel, Eigen::Vector3d wm, Eigen::Vector3d am) {
 
+    // Push back to our propagator
+    propagator->feed_imu(timestamp,wm,am);
+    propagator->feed_wheel_linear_vel(t_wh, linearVel);
+
+    // Push back to our initializer
+    if(!is_initialized_vio) {
+        initializer->feed_imu(timestamp, wm, am);
+    }
+
+}
+
+///NEW
+void VioManager::feed_measurement_wheel(double timestamp, float linear_vel_x)
+{
+    // Push back to our propagator
+    propagator->feed_wheel_linear_vel(timestamp, linear_vel_x);
+}
 
 
 void VioManager::feed_measurement_monocular(double timestamp, cv::Mat& img0, size_t cam_id) {
 
     // Start timing
     rT1 =  boost::posix_time::microsec_clock::local_time();
-
-    // Downsample if we are downsampling
-    if(params.downsample_cameras) {
-        cv::Mat img0_temp;
-        cv::pyrDown(img0,img0_temp,cv::Size(img0.cols/2.0,img0.rows/2.0));
-        img0 = img0_temp.clone();
-    }
 
     // Feed our trackers
     trackFEATS->feed_monocular(timestamp, img0, cam_id);
@@ -190,15 +204,6 @@ void VioManager::feed_measurement_stereo(double timestamp, cv::Mat& img0, cv::Ma
 
     // Assert we have good ids
     assert(cam_id0!=cam_id1);
-
-    // Downsample if we are downsampling
-    if(params.downsample_cameras) {
-        cv::Mat img0_temp, img1_temp;
-        cv::pyrDown(img0,img0_temp,cv::Size(img0.cols/2.0,img0.rows/2.0));
-        cv::pyrDown(img1,img1_temp,cv::Size(img1.cols/2.0,img1.rows/2.0));
-        img0 = img0_temp.clone();
-        img1 = img1_temp.clone();
-    }
 
     // Feed our stereo trackers, if we are not doing binocular
     if(params.use_stereo) {
@@ -294,7 +299,6 @@ bool VioManager::try_to_initialize() {
     //imu_val.block(10,0,3,1) << 0,0,0;
     //imu_val.block(13,0,3,1) << 0,0,0;
     state->_imu->set_value(imu_val);
-    state->_imu->set_fej(imu_val);
     state->_timestamp = time0;
     startup_time = time0;
 

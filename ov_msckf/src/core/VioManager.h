@@ -60,13 +60,19 @@ namespace ov_msckf {
 
 
     public:
-
+        bool useWO = false;
 
         /**
          * @brief Default constructor, will load all configuration variables
          * @param params_ Parameters loaded from either ROS or CMDLINE
          */
         VioManager(VioManagerOptions& params_);
+
+        void set_use_wheel_odom(bool use_WO)
+        {
+            useWO = use_WO;
+            propagator->useWO = useWO;
+        }
 
 
         /**
@@ -77,6 +83,14 @@ namespace ov_msckf {
          */
         void feed_measurement_imu(double timestamp, Eigen::Vector3d wm, Eigen::Vector3d am);
 
+        void feed_measurement_imu_whOdom(double timestamp, double t_wh, const float linearVel, Eigen::Vector3d wm, Eigen::Vector3d am);
+
+        /// NEW
+        /**
+         * @brief Feed function for wheel odometry data
+         * @param linear velocity twist x
+         */
+        void feed_measurement_wheel(double timestamp, float linear_vel_x);
 
         /**
          * @brief Feed function for a single camera
@@ -112,7 +126,6 @@ namespace ov_msckf {
 
             // Initialize the system
             state->_imu->set_value(imustate.block(1,0,16,1));
-            state->_imu->set_fej(imustate.block(1,0,16,1));
             state->_timestamp = imustate(0,0);
             startup_time = imustate(0,0);
             is_initialized_vio = true;

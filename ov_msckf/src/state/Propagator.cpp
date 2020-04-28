@@ -60,7 +60,18 @@ void Propagator::propagate_and_clone(State* state, double timestamp) {
     // First lets construct an IMU vector of measurements we need
     double time0 = state->_timestamp+last_prop_time_offset;
     double time1 = timestamp+t_off_new;
-    vector<IMUDATA> prop_data = Propagator::select_imu_readings(imu_data,time0,time1);
+    vector<IMUDATA> prop_data;// = Propagator::select_imu_readings(imu_data,time0,time1);
+    vector<WOdata> prop_wo_data;
+    if (useWO)
+    {
+        IMU_WO_DATA imu_wo_prop_data = Propagator::select_imu_WO_readings(imu_data,wo_data,time0,time1);
+        prop_data = imu_wo_prop_data.imu_data_vec;
+        prop_wo_data = imu_wo_prop_data.wo_data_vec;
+    }
+    else
+    {
+        prop_data = Propagator::select_imu_readings(imu_data,time0,time1);
+    }
 
     // We are going to sum up all the state transition matrices, so we can do a single large multiplication at the end
     // Phi_summed = Phi_i*Phi_summed
@@ -79,7 +90,15 @@ void Propagator::propagate_and_clone(State* state, double timestamp) {
             // Get the next state Jacobian and noise Jacobian for this IMU reading
             Eigen::Matrix<double, 15, 15> F = Eigen::Matrix<double, 15, 15>::Zero();
             Eigen::Matrix<double, 15, 15> Qdi = Eigen::Matrix<double, 15, 15>::Zero();
-            predict_and_compute(state, prop_data.at(i), prop_data.at(i+1), F, Qdi);
+            //predict_and_compute(state, prop_data.at(i), prop_data.at(i+1), F, Qdi);
+            if (useWO)
+            {
+                predict_and_compute_WO(state, prop_data.at(i), prop_data.at(i+1), prop_wo_data.at(i), prop_wo_data.at(i+1), F, Qdi);
+            }
+            else
+            {
+                predict_and_compute(state, prop_data.at(i), prop_data.at(i+1), F, Qdi);
+            }
 
             // Next we should propagate our IMU covariance
             // Pii' = F*Pii*F.transpose() + G*Q*G.transpose()
@@ -130,7 +149,18 @@ void Propagator::fast_state_propagate(State *state, double timestamp, Eigen::Mat
     // First lets construct an IMU vector of measurements we need
     double time0 = state->_timestamp+last_prop_time_offset;
     double time1 = timestamp+t_off_new;
-    vector<IMUDATA> prop_data = Propagator::select_imu_readings(imu_data,time0,time1);
+    vector<IMUDATA> prop_data;// = Propagator::select_imu_readings(imu_data,time0,time1);
+    vector<WOdata> prop_wo_data;
+    if (useWO)
+    {
+        IMU_WO_DATA imu_wo_prop_data = Propagator::select_imu_WO_readings(imu_data,wo_data,time0,time1);
+        prop_data = imu_wo_prop_data.imu_data_vec;
+        prop_wo_data = imu_wo_prop_data.wo_data_vec;
+    }
+    else
+    {
+        prop_data = Propagator::select_imu_readings(imu_data,time0,time1);
+    }
 
     // Save the original IMU state
     Eigen::VectorXd orig_val = state->_imu->value();
@@ -284,6 +314,136 @@ std::vector<Propagator::IMUDATA> Propagator::select_imu_readings(const std::vect
 }
 
 
+
+
+
+Propagator::IMU_WO_DATA Propagator::select_imu_WO_readings(const std::vector<IMUDATA>& imu_data, const std::vector<WOdata>& wo_data, double time0, double time1) {
+
+    // Our vector imu readings
+    Propagator::IMU_WO_DATA prop_IMU_WO_data;
+    
+
+    // Ensure we have some measurements in the first place!
+    if(imu_data.empty()) {
+        printf(YELLOW "Propagator::select_imu_WO_readings(): No IMU measurements. IMU-CAMERA are likely messed up!!!\n" RESET);
+        return prop_IMU_WO_data;
+    }
+
+    if(wo_data.empty()) {
+        printf(YELLOW "Propagator::select_imu_WO_readings(): No WO measurements.\n" RESET);
+        return prop_IMU_WO_data;
+    }
+
+    // Loop through and find all the needed measurements to propagate with
+    // Note we split measurements based on the given state time, and the update timestamp
+    for(size_t i=0; i<imu_data.size()-1; i++) {
+        // Append the wheel odometry data
+        prop_IMU_WO_data.wo_data_vec.push_back(wo_data.at(i));
+
+        // START OF THE INTEGRATION PERIOD
+        // If the next timestamp is greater then our current state time
+        // And the current is not greater then it yet...
+        // Then we should "split" our current IMU measurement
+        if(imu_data.at(i+1).timestamp > time0 && imu_data.at(i).timestamp < time0) {
+            IMUDATA data = Propagator::interpolate_data(imu_data.at(i),imu_data.at(i+1), time0);
+            prop_IMU_WO_data.imu_data_vec.push_back(data);
+            //printf("propagation #%d = CASE 1 = %.3f => %.3f\n", (int)i,data.timestamp-prop_data.at(0).timestamp,time0-prop_data.at(0).timestamp);
+            continue;
+        }
+
+        // MIDDLE OF INTEGRATION PERIOD
+        // If our imu measurement is right in the middle of our propagation period
+        // Then we should just append the whole measurement time to our propagation vector
+        if(imu_data.at(i).timestamp >= time0 && imu_data.at(i+1).timestamp <= time1) {
+            prop_IMU_WO_data.imu_data_vec.push_back(imu_data.at(i));
+            //printf("propagation #%d = CASE 2 = %.3f\n",(int)i,imu_data.at(i).timestamp-prop_data.at(0).timestamp);
+            continue;
+        }
+
+        // END OF THE INTEGRATION PERIOD
+        // If the current timestamp is greater then our update time
+        // We should just "split" the NEXT IMU measurement to the update time,
+        // NOTE: we add the current time, and then the time at the end of the interval (so we can get a dt)
+        // NOTE: we also break out of this loop, as this is the last IMU measurement we need!
+        if(imu_data.at(i+1).timestamp > time1) {
+            // If we have a very low frequency IMU then, we could have only recorded the first integration (i.e. case 1) and nothing else
+            // In this case, both the current IMU measurement and the next is greater than the desired intepolation, thus we should just cut the current at the desired time
+            // Else, we have hit CASE2 and this IMU measurement is not past the desired propagation time, thus add the whole IMU reading
+            if(imu_data.at(i).timestamp > time1) {
+                IMUDATA data = interpolate_data(imu_data.at(i-1), imu_data.at(i), time1);
+                prop_IMU_WO_data.imu_data_vec.push_back(data);
+                //printf("propagation #%d = CASE 3.1 = %.3f => %.3f\n", (int)i,imu_data.at(i).timestamp-prop_data.at(0).timestamp,imu_data.at(i).timestamp-time0);
+            } else {
+                prop_IMU_WO_data.imu_data_vec.push_back(imu_data.at(i));
+                //printf("propagation #%d = CASE 3.2 = %.3f => %.3f\n", (int)i,imu_data.at(i).timestamp-prop_data.at(0).timestamp,imu_data.at(i).timestamp-time0);
+            }
+            // If the added IMU message doesn't end exactly at the camera time
+            // Then we need to add another one that is right at the ending time
+            if(prop_IMU_WO_data.imu_data_vec.at(prop_IMU_WO_data.imu_data_vec.size()-1).timestamp != time1) {
+                IMUDATA data = interpolate_data(imu_data.at(i), imu_data.at(i+1), time1);
+                prop_IMU_WO_data.imu_data_vec.push_back(data);
+                //printf("propagation #%d = CASE 3.3 = %.3f => %.3f\n", (int)i,data.timestamp-prop_data.at(0).timestamp,data.timestamp-time0);
+            }
+            break;
+        }
+
+    }
+
+    // Check that we have at least one measurement to propagate with
+    if(prop_IMU_WO_data.imu_data_vec.empty()) {
+        printf(YELLOW "Propagator::select_imu_readings(): No IMU measurements to propagate with (%d of 2). IMU-CAMERA are likely messed up!!!\n" RESET, (int)prop_IMU_WO_data.imu_data_vec.size());
+        return prop_IMU_WO_data;
+    }
+
+    if(prop_IMU_WO_data.wo_data_vec.empty()) {
+        printf(YELLOW "Propagator::select_imu_readings(): No WO measurements to propagate with (%d of 2).\n" RESET, (int)prop_IMU_WO_data.wo_data_vec.size());
+        return prop_IMU_WO_data;
+    }
+
+    // If we did not reach the whole integration period (i.e., the last inertial measurement we have is smaller then the time we want to reach)
+    // Then we should just "stretch" the last measurement to be the whole period (case 3 in the above loop)
+    //if(time1-imu_data.at(imu_data.size()-1).timestamp > 1e-3) {
+    //    printf(YELLOW "Propagator::select_imu_readings(): Missing inertial measurements to propagate with (%.6f sec missing). IMU-CAMERA are likely messed up!!!\n" RESET, (time1-imu_data.at(imu_data.size()-1).timestamp));
+    //    return prop_data;
+    //}
+
+    // Loop through and ensure we do not have an zero dt values
+    // This would cause the noise covariance to be Infinity
+    for (size_t i=0; i < prop_IMU_WO_data.imu_data_vec.size()-1; i++) {
+        if (std::abs(prop_IMU_WO_data.imu_data_vec.at(i+1).timestamp-prop_IMU_WO_data.imu_data_vec.at(i).timestamp) < 1e-12) {
+            printf(YELLOW "Propagator::select_imu_readings(): Zero DT between IMU reading %d and %d, removing it!\n" RESET, (int)i, (int)(i+1));
+            prop_IMU_WO_data.imu_data_vec.erase(prop_IMU_WO_data.imu_data_vec.begin()+i);
+            i--;
+        }
+
+        /*if (std::abs(prop_IMU_WO_data.wo_data_vec.at(i+1).timestamp-prop_IMU_WO_data.wo_data_vec.at(i).timestamp) < 1e-12) {
+            printf(YELLOW "Propagator::select_imu_readings(): Zero DT between WO reading %d and %d, removing it!\n" RESET, (int)i, (int)(i+1));
+            prop_IMU_WO_data.wo_data_vec.erase(prop_IMU_WO_data.wo_data_vec.begin()+i);
+            i--;
+        }*/
+    }
+
+    // Check that we have at least one measurement to propagate with
+    if(prop_IMU_WO_data.imu_data_vec.size() < 2) {
+        printf(YELLOW "Propagator::select_imu_readings(): No IMU measurements to propagate with (%d of 2). IMU-CAMERA are likely messed up!!!\n" RESET, (int)prop_IMU_WO_data.imu_data_vec.size());
+        return prop_IMU_WO_data;
+    }
+
+    if(prop_IMU_WO_data.wo_data_vec.size() < 2) {
+        printf(YELLOW "Propagator::select_imu_readings(): No WO measurements to propagate with (%d of 2).\n" RESET, (int)prop_IMU_WO_data.wo_data_vec.size());
+        return prop_IMU_WO_data;
+    }
+
+    // Success :D
+    return prop_IMU_WO_data;
+
+}
+
+
+
+
+
+
 void Propagator::predict_and_compute(State *state, const IMUDATA data_minus, const IMUDATA data_plus,
                                      Eigen::Matrix<double,15,15> &F, Eigen::Matrix<double,15,15> &Qd) {
 
@@ -397,6 +557,135 @@ void Propagator::predict_and_compute(State *state, const IMUDATA data_minus, con
 }
 
 
+
+void Propagator::predict_and_compute_WO(State *state, const IMUDATA data_minus, const IMUDATA data_plus, 
+                                        const WOdata data_wo_minus, const WOdata data_wo_plus,
+                                        Eigen::Matrix<double,15,15> &F, Eigen::Matrix<double,15,15> &Qd) {
+
+    // Set them to zero
+    F.setZero();
+    Qd.setZero();
+
+    // Time elapsed over interval
+    double dt = data_plus.timestamp-data_minus.timestamp;
+    double dt_wo = data_wo_plus.timestamp - data_wo_minus.timestamp;
+    //assert(data_plus.timestamp>data_minus.timestamp);
+
+    // Corrected imu measurements
+    Eigen::Matrix<double,3,1> w_hat = data_minus.wm - state->_imu->bias_g();
+    Eigen::Matrix<double,3,1> a_hat = data_minus.am - state->_imu->bias_a();
+    Eigen::Matrix<double,3,1> w_hat2 = data_plus.wm - state->_imu->bias_g();
+    Eigen::Matrix<double,3,1> a_hat2 = data_plus.am - state->_imu->bias_a();
+
+    float wo_vel1 = data_wo_minus.linear_vel;
+    float wo_vel2 = data_wo_plus.linear_vel;
+
+    // Compute the new state mean value
+    Eigen::Vector4d new_q;
+    Eigen::Vector3d new_v, new_p;
+    if (useWO)
+    {
+        if(state->_options.use_rk4_integration) predict_mean_rk4(state, dt, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
+        else predict_mean_discrete_wo(state, dt, dt_wo, wo_vel1, wo_vel2, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
+    }
+    else
+    {
+        if(state->_options.use_rk4_integration) predict_mean_rk4(state, dt, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
+        else predict_mean_discrete(state, dt, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
+    }
+    
+
+    // Get the locations of each entry of the imu state
+    int th_id = state->_imu->q()->id()-state->_imu->id();
+    int p_id = state->_imu->p()->id()-state->_imu->id();
+    int v_id = state->_imu->v()->id()-state->_imu->id();
+    int bg_id = state->_imu->bg()->id()-state->_imu->id();
+    int ba_id = state->_imu->ba()->id()-state->_imu->id();
+
+    // Allocate noise Jacobian
+    Eigen::Matrix<double,15,12> G = Eigen::Matrix<double,15,12>::Zero();
+
+    // Now compute Jacobian of new state wrt old state and noise
+    if (state->_options.do_fej) {
+
+        // This is the change in the orientation from the end of the last prop to the current prop
+        // This is needed since we need to include the "k-th" updated orientation information
+        Eigen::Matrix<double,3,3> Rfej = state->_imu->Rot_fej();
+        Eigen::Matrix<double,3,3> dR = quat_2_Rot(new_q)*Rfej.transpose();
+
+        Eigen::Matrix<double,3,1> v_fej = state->_imu->vel_fej();
+        Eigen::Matrix<double,3,1> p_fej = state->_imu->pos_fej();
+
+        F.block(th_id, th_id, 3, 3) = dR;
+        F.block(th_id, bg_id, 3, 3).noalias() = -dR * Jr_so3(-w_hat * dt) * dt;
+        //F.block(th_id, bg_id, 3, 3).noalias() = -dR * Jr_so3(-log_so3(dR)) * dt;
+        F.block(bg_id, bg_id, 3, 3).setIdentity();
+        F.block(v_id, th_id, 3, 3).noalias() = -skew_x(new_v-v_fej+_gravity*dt)*Rfej.transpose();
+        //F.block(v_id, th_id, 3, 3).noalias() = -Rfej.transpose() * skew_x(Rfej*(new_v-v_fej+_gravity*dt));
+        F.block(v_id, v_id, 3, 3).setIdentity();
+        F.block(v_id, ba_id, 3, 3) = -Rfej.transpose() * dt;
+        F.block(ba_id, ba_id, 3, 3).setIdentity();
+        F.block(p_id, th_id, 3, 3).noalias() = -skew_x(new_p-p_fej-v_fej*dt+0.5*_gravity*dt*dt)*Rfej.transpose();
+        //F.block(p_id, th_id, 3, 3).noalias() = -0.5 * Rfej.transpose() * skew_x(2*Rfej*(new_p-p_fej-v_fej*dt+0.5*_gravity*dt*dt));
+        F.block(p_id, v_id, 3, 3) = Eigen::Matrix<double, 3, 3>::Identity() * dt;
+        F.block(p_id, ba_id, 3, 3) = -0.5 * Rfej.transpose() * dt * dt;
+        F.block(p_id, p_id, 3, 3).setIdentity();
+
+        G.block(th_id, 0, 3, 3) = -dR * Jr_so3(-w_hat * dt) * dt;
+        //G.block(th_id, 0, 3, 3) = -dR * Jr_so3(-log_so3(dR)) * dt;
+        G.block(v_id, 3, 3, 3) = -Rfej.transpose() * dt;
+        G.block(p_id, 3, 3, 3) = -0.5 * Rfej.transpose() * dt * dt;
+        G.block(bg_id, 6, 3, 3) = dt*Eigen::Matrix<double,3,3>::Identity();
+        G.block(ba_id, 9, 3, 3) = dt*Eigen::Matrix<double,3,3>::Identity();
+
+    } else {
+
+        Eigen::Matrix<double,3,3> R_Gtoi = state->_imu->Rot();
+
+        F.block(th_id, th_id, 3, 3) = exp_so3(-w_hat * dt);
+        F.block(th_id, bg_id, 3, 3).noalias() = -exp_so3(-w_hat * dt) * Jr_so3(-w_hat * dt) * dt;
+        F.block(bg_id, bg_id, 3, 3).setIdentity();
+        F.block(v_id, th_id, 3, 3).noalias() = -R_Gtoi.transpose() * skew_x(a_hat * dt);
+        F.block(v_id, v_id, 3, 3).setIdentity();
+        F.block(v_id, ba_id, 3, 3) = -R_Gtoi.transpose() * dt;
+        F.block(ba_id, ba_id, 3, 3).setIdentity();
+        F.block(p_id, th_id, 3, 3).noalias() = -0.5 * R_Gtoi.transpose() * skew_x(a_hat * dt * dt);
+        F.block(p_id, v_id, 3, 3) = Eigen::Matrix<double, 3, 3>::Identity() * dt;
+        F.block(p_id, ba_id, 3, 3) = -0.5 * R_Gtoi.transpose() * dt * dt;
+        F.block(p_id, p_id, 3, 3).setIdentity();
+
+        G.block(th_id, 0, 3, 3) = -exp_so3(-w_hat * dt) * Jr_so3(-w_hat * dt) * dt;
+        G.block(v_id, 3, 3, 3) = -R_Gtoi.transpose() * dt;
+        G.block(p_id, 3, 3, 3) = -0.5 * R_Gtoi.transpose() * dt * dt;
+        G.block(bg_id, 6, 3, 3) = dt*Eigen::Matrix<double,3,3>::Identity();
+        G.block(ba_id, 9, 3, 3) = dt*Eigen::Matrix<double,3,3>::Identity();
+    }
+
+    // Construct our discrete noise covariance matrix
+    // Note that we need to convert our continuous time noises to discrete
+    // Equations (129) amd (130) of Trawny tech report
+    Eigen::Matrix<double,12,12> Qc = Eigen::Matrix<double,12,12>::Zero();
+    Qc.block(0,0,3,3) = _noises.sigma_w_2/dt*Eigen::Matrix<double,3,3>::Identity();
+    Qc.block(3,3,3,3) = _noises.sigma_a_2/dt*Eigen::Matrix<double,3,3>::Identity();
+    Qc.block(6,6,3,3) = _noises.sigma_wb_2/dt*Eigen::Matrix<double,3,3>::Identity();
+    Qc.block(9,9,3,3) = _noises.sigma_ab_2/dt*Eigen::Matrix<double,3,3>::Identity();
+
+    // Compute the noise injected into the state over the interval
+    Qd = G*Qc*G.transpose();
+    Qd = 0.5*(Qd+Qd.transpose());
+
+    //Now replace imu estimate and fej with propagated values
+    Eigen::Matrix<double,16,1> imu_x = state->_imu->value();
+    imu_x.block(0,0,4,1) = new_q;
+    imu_x.block(4,0,3,1) = new_p;
+    imu_x.block(7,0,3,1) = new_v;
+    state->_imu->set_value(imu_x);
+    state->_imu->set_fej(imu_x);
+
+}
+
+
+
 void Propagator::predict_mean_discrete(State *state, double dt,
                                         const Eigen::Vector3d &w_hat1, const Eigen::Vector3d &a_hat1,
                                         const Eigen::Vector3d &w_hat2, const Eigen::Vector3d &a_hat2,
@@ -431,6 +720,75 @@ void Propagator::predict_mean_discrete(State *state, double dt,
     // Position: just velocity times dt, with the acceleration integrated twice
     new_p = state->_imu->pos() + state->_imu->vel()*dt + 0.5*R_Gtoi.transpose()*a_hat*dt*dt - 0.5*_gravity*dt*dt;
 
+}
+
+void Propagator::predict_mean_discrete_wo(State *state, double dt, double dt_wo, const float wo_vel1, const float wo_vel2,
+                                        const Eigen::Vector3d &w_hat1, const Eigen::Vector3d &a_hat1,
+                                        const Eigen::Vector3d &w_hat2, const Eigen::Vector3d &a_hat2,
+                                        Eigen::Vector4d &new_q, Eigen::Vector3d &new_v, Eigen::Vector3d &new_p) {
+
+    // If we are averaging the IMU, then do so
+    Eigen::Vector3d w_hat = w_hat1;
+    Eigen::Vector3d a_hat = a_hat1;
+    float wo_vel = wo_vel1;
+    if (state->_options.imu_avg) {
+        w_hat = .5*(w_hat1+w_hat2);
+        a_hat = .5*(a_hat1+a_hat2);
+        wo_vel = .5*(wo_vel1 + wo_vel2);
+    }
+
+
+    // Pre-compute things
+    double w_norm = w_hat.norm();
+    Eigen::Matrix<double,4,4> I_4x4 = Eigen::Matrix<double,4,4>::Identity();
+    Eigen::Matrix<double,3,3> R_Gtoi = state->_imu->Rot();
+
+    // Orientation: Equation (101) and (103) and of Trawny indirect TR
+    Eigen::Matrix<double,4,4> bigO;
+    if(w_norm > 1e-20) {
+        bigO = cos(0.5*w_norm*dt)*I_4x4 + 1/w_norm*sin(0.5*w_norm*dt)*Omega(w_hat);
+    } else {
+        bigO = I_4x4 + 0.5*dt*Omega(w_hat);
+    }
+    new_q = quatnorm(bigO*state->_imu->quat());
+    //new_q = rot_2_quat(exp_so3(-w_hat*dt)*R_Gtoi);
+
+
+    // adding wh odom vel
+    if (first_IMU_reading == true)
+    {
+        first_R_Gtoi = R_Gtoi;
+        first_IMU_reading = false;
+    }
+    Eigen::Vector3d un_vel = Eigen::Vector3d(0, wo_vel, 0);
+    Eigen::Matrix3d rot_mat =  R_Gtoi.transpose() * first_R_Gtoi;
+    Eigen::Quaterniond trans_Q(rot_mat);
+    un_vel = trans_Q * un_vel;
+
+
+    
+    std::cout<<"TRANSFORMATION QUATERNION"<<std::endl;
+    std::cout<< "trans_Q.w() = " <<trans_Q.w()<<std::endl;
+    std::cout<< "trans_Q.vec() = " <<trans_Q.vec()<<std::endl;
+    std::cout<<"TRANSFORMED VELOCITY"<<std::endl;
+    std::cout<<un_vel<<std::endl;
+    /*std::cout<<"INITIAL ROTATION"<<std::endl;
+    std::cout<< first_R_Gtoi <<std::endl;
+    std::cout<<"ESTIMATED ROTATION"<<std::endl;
+    std::cout<< R_Gtoi <<std::endl;*/
+
+    /*if (abs(wheel_odom_timestamp) < 0.003)
+    {*/
+        new_p = state->_imu->pos() + dt_wo * un_vel;
+        new_v  = un_vel;
+        /*new_v = un_vel + R_Gtoi.transpose()*a_hat*dt - _gravity*dt;
+        new_p = state->_imu->pos() + un_vel*dt + 0.5*R_Gtoi.transpose()*a_hat*dt*dt - 0.5*_gravity*dt*dt;*/
+    /*}
+    else
+    {
+        new_v = state->_imu->vel() + R_Gtoi.transpose()*a_hat*dt - _gravity*dt;
+        new_p = state->_imu->pos() + state->_imu->vel()*dt + 0.5*R_Gtoi.transpose()*a_hat*dt*dt - 0.5*_gravity*dt*dt;
+    }*/
 }
 
 
