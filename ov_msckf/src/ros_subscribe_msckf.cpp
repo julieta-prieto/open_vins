@@ -61,7 +61,7 @@ void callback_stereo(const sensor_msgs::ImageConstPtr& msg0, const sensor_msgs::
 ros::Publisher wheelodom_globalframe_pub;
 nav_msgs::Odometry wh_odom_g;
 bool use_WO;
-double wo_timestamp;
+double wo_timestamp = 0;
 float wo_linear_vel_x;
 
 // Main function
@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
 
     // Indicate whether wheel odometry is used or not
     use_WO = params.use_wheel_odometry;
-
+    sys->set_use_wheel_odom(use_WO);
     //===================================================================================
     //===================================================================================
     //===================================================================================
@@ -165,18 +165,19 @@ void callback_inertial(const sensor_msgs::Imu::ConstPtr& msg) {
 
     if (use_WO)
     {
-        if(wo_timestamp <= timem && fabs(wo_linear_vel_x) < 10)
+        //std::cout << "time diff between odom and imu msg: " << timem - wo_timestamp << std::endl;
+        if(timem - wo_timestamp < 0.05 && fabs(wo_linear_vel_x) < 2)
         {
-          //std::cout << "time diff between odom and imu msg: " << t - wh_odom_t << std::endl;
           //Eigen::Vector3d vel(0, wh_odom.twist.twist.linear.x, 0);
-            sys->set_use_wheel_odom(true);
+          //sys->set_use_wheel_odom(true);
+          std::cout << "input wh odom data" << std::endl;
           sys->feed_measurement_imu_whOdom(timem, wo_timestamp, wo_linear_vel_x, wm, am);
         }
         else
         {
-          sys->set_use_wheel_odom(false);
+          //sys->set_use_wheel_odom(false);
           sys->feed_measurement_imu(timem, wm, am);
-          std::cout << "did not get odom msg with Imu" << std::endl;
+          //std::cout << "did not get odom msg with Imu" << std::endl;
         }
     }
     else

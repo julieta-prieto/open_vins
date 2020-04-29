@@ -73,6 +73,7 @@ void Propagator::propagate_and_clone(State* state, double timestamp) {
         prop_data = Propagator::select_imu_readings(imu_data,time0,time1);
     }
 
+
     // We are going to sum up all the state transition matrices, so we can do a single large multiplication at the end
     // Phi_summed = Phi_i*Phi_summed
     // Q_summed = Phi_i*Q_summed*Phi_i^T + Q_i
@@ -90,10 +91,16 @@ void Propagator::propagate_and_clone(State* state, double timestamp) {
             // Get the next state Jacobian and noise Jacobian for this IMU reading
             Eigen::Matrix<double, 15, 15> F = Eigen::Matrix<double, 15, 15>::Zero();
             Eigen::Matrix<double, 15, 15> Qdi = Eigen::Matrix<double, 15, 15>::Zero();
+
             //predict_and_compute(state, prop_data.at(i), prop_data.at(i+1), F, Qdi);
-            if (useWO)
+            if(!prop_wo_data.empty())
             {
+              if (i < prop_wo_data.size() - 1)
+              {
                 predict_and_compute_WO(state, prop_data.at(i), prop_data.at(i+1), prop_wo_data.at(i), prop_wo_data.at(i+1), F, Qdi);
+              }
+              else
+                 predict_and_compute(state, prop_data.at(i), prop_data.at(i+1), F, Qdi);
             }
             else
             {
@@ -313,32 +320,29 @@ std::vector<Propagator::IMUDATA> Propagator::select_imu_readings(const std::vect
 
 }
 
-
-
-
-
 Propagator::IMU_WO_DATA Propagator::select_imu_WO_readings(const std::vector<IMUDATA>& imu_data, const std::vector<WOdata>& wo_data, double time0, double time1) {
 
     // Our vector imu readings
     Propagator::IMU_WO_DATA prop_IMU_WO_data;
-    
+
 
     // Ensure we have some measurements in the first place!
     if(imu_data.empty()) {
-        printf(YELLOW "Propagator::select_imu_WO_readings(): No IMU measurements. IMU-CAMERA are likely messed up!!!\n" RESET);
+        printf(YELLOW "Propagator::select_imu_readings(): No IMU measurements. IMU-CAMERA are likely messed up!!!\n" RESET);
         return prop_IMU_WO_data;
     }
 
-    if(wo_data.empty()) {
-        printf(YELLOW "Propagator::select_imu_WO_readings(): No WO measurements.\n" RESET);
-        return prop_IMU_WO_data;
-    }
+
+    for(size_t i = 0; i < wo_data.size()-1; ++i) {
+       if(wo_data.at(i).timestamp >= time0 && wo_data.at(i+1).timestamp <= time1) {
+           prop_IMU_WO_data.wo_data_vec.push_back(wo_data.at(i));
+           continue;
+       }
+     }
 
     // Loop through and find all the needed measurements to propagate with
     // Note we split measurements based on the given state time, and the update timestamp
     for(size_t i=0; i<imu_data.size()-1; i++) {
-        // Append the wheel odometry data
-        prop_IMU_WO_data.wo_data_vec.push_back(wo_data.at(i));
 
         // START OF THE INTEGRATION PERIOD
         // If the next timestamp is greater then our current state time
@@ -395,11 +399,6 @@ Propagator::IMU_WO_DATA Propagator::select_imu_WO_readings(const std::vector<IMU
         return prop_IMU_WO_data;
     }
 
-    if(prop_IMU_WO_data.wo_data_vec.empty()) {
-        printf(YELLOW "Propagator::select_imu_readings(): No WO measurements to propagate with (%d of 2).\n" RESET, (int)prop_IMU_WO_data.wo_data_vec.size());
-        return prop_IMU_WO_data;
-    }
-
     // If we did not reach the whole integration period (i.e., the last inertial measurement we have is smaller then the time we want to reach)
     // Then we should just "stretch" the last measurement to be the whole period (case 3 in the above loop)
     //if(time1-imu_data.at(imu_data.size()-1).timestamp > 1e-3) {
@@ -415,12 +414,6 @@ Propagator::IMU_WO_DATA Propagator::select_imu_WO_readings(const std::vector<IMU
             prop_IMU_WO_data.imu_data_vec.erase(prop_IMU_WO_data.imu_data_vec.begin()+i);
             i--;
         }
-
-        /*if (std::abs(prop_IMU_WO_data.wo_data_vec.at(i+1).timestamp-prop_IMU_WO_data.wo_data_vec.at(i).timestamp) < 1e-12) {
-            printf(YELLOW "Propagator::select_imu_readings(): Zero DT between WO reading %d and %d, removing it!\n" RESET, (int)i, (int)(i+1));
-            prop_IMU_WO_data.wo_data_vec.erase(prop_IMU_WO_data.wo_data_vec.begin()+i);
-            i--;
-        }*/
     }
 
     // Check that we have at least one measurement to propagate with
@@ -429,20 +422,10 @@ Propagator::IMU_WO_DATA Propagator::select_imu_WO_readings(const std::vector<IMU
         return prop_IMU_WO_data;
     }
 
-    if(prop_IMU_WO_data.wo_data_vec.size() < 2) {
-        printf(YELLOW "Propagator::select_imu_readings(): No WO measurements to propagate with (%d of 2).\n" RESET, (int)prop_IMU_WO_data.wo_data_vec.size());
-        return prop_IMU_WO_data;
-    }
-
     // Success :D
     return prop_IMU_WO_data;
 
 }
-
-
-
-
-
 
 void Propagator::predict_and_compute(State *state, const IMUDATA data_minus, const IMUDATA data_plus,
                                      Eigen::Matrix<double,15,15> &F, Eigen::Matrix<double,15,15> &Qd) {
@@ -557,7 +540,8 @@ void Propagator::predict_and_compute(State *state, const IMUDATA data_minus, con
 }
 
 
-
+//TODO: Julieta this function is almost similar to the predict_and_compute(), just use useWO parameter as a flag and try and
+//combine the predict_and_compute_WO and predict_and_compute() functions
 void Propagator::predict_and_compute_WO(State *state, const IMUDATA data_minus, const IMUDATA data_plus, 
                                         const WOdata data_wo_minus, const WOdata data_wo_plus,
                                         Eigen::Matrix<double,15,15> &F, Eigen::Matrix<double,15,15> &Qd) {
@@ -583,17 +567,12 @@ void Propagator::predict_and_compute_WO(State *state, const IMUDATA data_minus, 
     // Compute the new state mean value
     Eigen::Vector4d new_q;
     Eigen::Vector3d new_v, new_p;
+
     if (useWO)
     {
         if(state->_options.use_rk4_integration) predict_mean_rk4(state, dt, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
         else predict_mean_discrete_wo(state, dt, dt_wo, wo_vel1, wo_vel2, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
     }
-    else
-    {
-        if(state->_options.use_rk4_integration) predict_mean_rk4(state, dt, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
-        else predict_mean_discrete(state, dt, w_hat, a_hat, w_hat2, a_hat2, new_q, new_v, new_p);
-    }
-    
 
     // Get the locations of each entry of the imu state
     int th_id = state->_imu->q()->id()-state->_imu->id();
@@ -730,6 +709,9 @@ void Propagator::predict_mean_discrete_wo(State *state, double dt, double dt_wo,
     // If we are averaging the IMU, then do so
     Eigen::Vector3d w_hat = w_hat1;
     Eigen::Vector3d a_hat = a_hat1;
+    //std::cout << "wo_vel1: " << wo_vel1 << std::endl;
+    //std::cout << "wo_vel1: " << wo_vel2 << std::endl;
+
     float wo_vel = wo_vel1;
     if (state->_options.imu_avg) {
         w_hat = .5*(w_hat1+w_hat2);
@@ -760,18 +742,24 @@ void Propagator::predict_mean_discrete_wo(State *state, double dt, double dt_wo,
         first_R_Gtoi = R_Gtoi;
         first_IMU_reading = false;
     }
+
     Eigen::Vector3d un_vel = Eigen::Vector3d(0, wo_vel, 0);
     Eigen::Matrix3d rot_mat =  R_Gtoi.transpose() * first_R_Gtoi;
     Eigen::Quaterniond trans_Q(rot_mat);
     un_vel = trans_Q * un_vel;
+    //std::cout<< "un_vel:" << un_vel<<std::endl;
 
+    // Velocity: just the acceleration in the local frame, minus global gravity
+    new_v = un_vel;
 
-    
-    std::cout<<"TRANSFORMATION QUATERNION"<<std::endl;
-    std::cout<< "trans_Q.w() = " <<trans_Q.w()<<std::endl;
-    std::cout<< "trans_Q.vec() = " <<trans_Q.vec()<<std::endl;
-    std::cout<<"TRANSFORMED VELOCITY"<<std::endl;
-    std::cout<<un_vel<<std::endl;
+    // Position: just velocity times dt, with the acceleration integrated twice
+    new_p = state->_imu->pos() + un_vel*dt_wo;
+
+//    std::cout<<"TRANSFORMATION QUATERNION"<<std::endl;
+//    std::cout<< "trans_Q.w() = " <<trans_Q.w()<<std::endl;
+//    std::cout<< "trans_Q.vec() = " <<trans_Q.vec()<<std::endl;
+//    std::cout<<"TRANSFORMED VELOCITY"<<std::endl;
+//    std::cout<<un_vel<<std::endl;
     /*std::cout<<"INITIAL ROTATION"<<std::endl;
     std::cout<< first_R_Gtoi <<std::endl;
     std::cout<<"ESTIMATED ROTATION"<<std::endl;
@@ -779,8 +767,8 @@ void Propagator::predict_mean_discrete_wo(State *state, double dt, double dt_wo,
 
     /*if (abs(wheel_odom_timestamp) < 0.003)
     {*/
-        new_p = state->_imu->pos() + dt_wo * un_vel;
-        new_v  = un_vel;
+    //    new_p = state->_imu->pos() + dt_wo * un_vel;
+    //    new_v  = un_vel;
         /*new_v = un_vel + R_Gtoi.transpose()*a_hat*dt - _gravity*dt;
         new_p = state->_imu->pos() + un_vel*dt + 0.5*R_Gtoi.transpose()*a_hat*dt*dt - 0.5*_gravity*dt*dt;*/
     /*}
